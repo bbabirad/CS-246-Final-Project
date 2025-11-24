@@ -1,0 +1,25 @@
+import Player;
+Player& getCurrentPlayer(){
+	if (currentTurn == 0){
+		return players[0];
+	} 
+		return players[1];
+}
+Void display_board(){
+	board.display();
+}
+Void display_board_graphics(){
+	graphicsDisplay.render(board, players[0]);
+	graphicsDisplay.render(board, players[1]);
+}
+Void endGame(){
+	if(players[0].hasWon() == true){
+		cout << “Player 1 has won” << endl;
+	} else if (players[0].hasLost() == true){
+		cout << “Player 1 has lost” << endl;
+	} else if (players[1].hasWon() == true){
+		cout << “Player 2 has won” << endl;
+	} else {
+		cout << “Player 2 has lost” << endl;
+	}
+}
