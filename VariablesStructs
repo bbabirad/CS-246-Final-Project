@@ -1,0 +1,25 @@
+#include <bits/stdc++.h>
+using namespace std;
+
+/* ---------------------------
+   Constants (no enums)
+   --------------------------- */
+static const char TYPE_DATA = 'D';
+static const char TYPE_VIRUS = 'V';
+static const char TYPE_UNKNOWN = '?';
+
+/* ---------------------------
+   Utility types
+   --------------------------- */
+struct Pos { int r = 0, c = 0; Pos(int rr=0,int cc=0): r(rr), c(cc) {} };
+
+/* ---------------------------
+   Forward declarations
+   --------------------------- */
+struct Game;
+struct Player;
+struct Link;
+struct Board;
+struct Ability;
+struct CommandParser;
+struct Display;
