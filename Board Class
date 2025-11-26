@@ -1,3 +1,8 @@
+class Board{
+Vector<Link*> player1;
+Vector<Link*> player2;
+
+public:
 bool isBreaching(){
 	if (isBoosted == false && isVirus() == true){
 		return true;
@@ -62,4 +67,5 @@ void display(){
 			cout << firewalls[i][j];
 		}
 	}
+}
 }
