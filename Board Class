@@ -46,12 +46,12 @@ bool isServer(Pos pos, int playerID){
 void display(){
 	for(int i=0; i<8; i++){
 		for(int j=0; j<8; j++){
-			cout << grid[i][j];
+			out << grid[i][j];
 		}	
 	}
 	for(int I=0; I<8; j++){
 		for(int j=0; j<8; j++){
-			cout << firewalls[i][j];
+			out << firewalls[i][j];
 		}
 	}
 }
