@@ -34,7 +34,6 @@ struct Link {
     // Note: public members here for simplicity; could be private with getters/setters.
     int strength;
     char type;          // 'D' or 'V' or '?'
-    Player* owner;      // non-owning pointer to owner
     bool boosted = false;
     bool breached = false;
     bool reinforced = false;
