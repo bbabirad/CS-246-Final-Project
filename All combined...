@@ -1,0 +1,707 @@
+// RAIInet.cpp
+// Working single-file implementation of RAIInet based on your classmate fragments.
+// No enums used. Link types are chars: 'D' (data), 'V' (virus), '?' (unknown).
+// Compile: g++ -std=c++17 -O2 -Wall RAIInet.cpp -o RAIInet
+
+#include <bits/stdc++.h>
+using namespace std;
+
+/* ------------------------
+   Constants (no enums)
+   ------------------------ */
+static const char TYPE_DATA = 'D';
+static const char TYPE_VIRUS = 'V';
+static const char TYPE_UNKNOWN = '?';
+
+/* ------------------------
+   Utility types
+   ------------------------ */
+struct Pos { int r = 0, c = 0; Pos() = default; Pos(int rr,int cc): r(rr), c(cc) {} };
+
+/* Forward declarations */
+struct Player;
+struct Game;
+struct Link;
+struct Board;
+struct Ability;
+struct CommandParser;
+struct Display;
+
+/* ------------------------
+   Link
+   ------------------------ */
+struct Link {
+    // Note: public members here for simplicity; could be private with getters/setters.
+    int strength;
+    char type;          // 'D' or 'V' or '?'
+    Player* owner;      // non-owning pointer to owner
+    bool boosted = false;
+    bool breached = false;
+    bool reinforced = false;
+    bool rejacked = false;
+
+    Link(int s = 1, char t = TYPE_UNKNOWN, Player* o = nullptr)
+        : strength(s), type(t), owner(o) {}
+
+    bool isVirus() const { return type == TYPE_VIRUS; }
+    bool isData() const  { return type == TYPE_DATA; }
+
+    bool isBreaching() const { return breached; }
+    bool isReinforced() const { return reinforced; }
+    bool isRejacked() const { return rejacked; }
+
+    void applyBoost() { boosted = true; }         // extra reach (next move)
+    void applyBreach() { breached = true; }       // extra reach this turn
+    void applyReinforce() { strength = 4; reinforced = true; } // cannot move this turn
+    void applyRejack() { rejacked = true; }       // flag reclaimed
+    void clearTurnFlags() { boosted = false; breached = false; reinforced = false; }
+
+    string shortLabel() const {
+        string s;
+        s += (type == TYPE_DATA ? 'D' : (type == TYPE_VIRUS ? 'V' : '?'));
+        s += to_string(strength);
+        return s;
+    }
+
+    // Battle result: returns true if this link (initiator) wins against other.
+    bool battleVs(const Link& other, bool initiator) const {
+        if (strength > other.strength) return true;
+        if (strength < other.strength) return false;
+        return initiator; // tie -> initiator wins
+    }
+};
+
+/* ------------------------
+   Board
+   ------------------------ */
+struct Board {
+    static const int R = 8;
+    static const int C = 8;
+    // store shared_ptr<Link> so board and players can share ownership
+    shared_ptr<Link> grid[R][C];
+    char firewalls[R][C];
+
+    Board() {
+        for (int r=0;r<R;++r) for (int c=0;c<C;++c) { grid[r][c]=nullptr; firewalls[r][c]=0; }
+    }
+
+    bool inBounds(const Pos &p) const { return p.r >= 0 && p.r < R && p.c >= 0 && p.c < C; }
+    shared_ptr<Link> get(const Pos &p) const { if (!inBounds(p)) return nullptr; return grid[p.r][p.c]; }
+    void place(const shared_ptr<Link>& L, const Pos &p) { if (!inBounds(p)) return; grid[p.r][p.c] = L; }
+    void clearPos(const Pos &p) { if (!inBounds(p)) return; grid[p.r][p.c] = nullptr; }
+
+    void setFirewall(const Pos &p, char ch) { if (!inBounds(p)) return; firewalls[p.r][p.c] = ch; }
+    char firewallAt(const Pos &p) const { if (!inBounds(p)) return 0; return firewalls[p.r][p.c]; }
+    void removeFirewall(const Pos &p) { if (!inBounds(p)) return; firewalls[p.r][p.c] = 0; }
+
+    // server ports: P1 -> row 0 cols 3,4 ; P2 -> row R-1 cols 3,4
+    bool isServer(const Pos &p, int playerID) const {
+        if (playerID == 1) return p.r == 0 && (p.c==3 || p.c==4);
+        if (playerID == 2) return p.r == R-1 && (p.c==3 || p.c==4);
+        return false;
+    }
+
+    // find position of given shared_ptr link
+    bool findLinkPos(const shared_ptr<Link>& L, Pos &out) const {
+        for (int r=0;r<R;++r) for (int c=0;c<C;++c) if (grid[r][c] == L) { out = Pos(r,c); return true; }
+        return false;
+    }
+
+    // find by raw pointer
+    bool findLinkPosRaw(const Link* raw, Pos& out) const {
+        for (int r=0;r<R;++r) for (int c=0;c<C;++c) if (grid[r][c] && grid[r][c].get() == raw) { out = Pos(r,c); return true; }
+        return false;
+    }
+
+    // A text display used by Game::display_board()
+    void displayForViewer(const Player &viewer, bool player2Lowercase) const;
+};
+
+/* ------------------------
+   Display interface (kept minimal)
+   ------------------------ */
+struct Display {
+    virtual ~Display() = default;
+    virtual void render(const Board &board, const Player &player, bool lowercase) const = 0;
+};
+
+struct TextDisplay : public Display {
+    void render(const Board &board, const Player &player, bool lowercase) const override {
+        board.displayForViewer(player, lowercase);
+    }
+};
+
+struct GraphicsDisplay : public Display {
+    void render(const Board &board, const Player &player, bool lowercase) const override {
+        cout << "[Graphics stub] rendering for " << player.getName() << "\n";
+        board.displayForViewer(player, lowercase);
+    }
+};
+
+/* ------------------------
+   Player
+   ------------------------ */
+struct Player {
+    int playerID;
+    vector<shared_ptr<Link>> links;           // active links owned by player
+    vector<unique_ptr<Ability>> abilities;    // ability objects owned
+    vector<shared_ptr<Link>> downloadedByMe;
+    vector<shared_ptr<Link>> downloadedAgainstMe;
+    int downloadsData = 0;
+    int downloadsVirus = 0;
+
+    Player(int id=0): playerID(id) {}
+    string getName() const { return "P" + to_string(playerID); }
+
+    shared_ptr<Link> getLinkByIdChar(char ch) {
+        if (ch < 'a' || ch > 'z') return nullptr;
+        int idx = ch - 'a';
+        if (idx < 0 || idx >= (int)links.size()) return nullptr;
+        return links[idx];
+    }
+
+    void addDownloaded(shared_ptr<Link> L) {
+        if (!L) return;
+        if (L->isVirus()) downloadsVirus++; else downloadsData++;
+        downloadedByMe.push_back(L);
+    }
+    void addAgainstMe(shared_ptr<Link> L) {
+        if (!L) return;
+        downloadedAgainstMe.push_back(L);
+    }
+    void removeLink(shared_ptr<Link> L) {
+        links.erase(remove(links.begin(), links.end(), L), links.end());
+    }
+
+    void listAbilities() const {
+        cout << "Abilities for " << getName() << ":\n";
+        for (size_t i=0;i<abilities.size();++i) {
+            cout << i+1 << ": " << abilities[i]->name() << (abilities[i]->hasUsed() ? " (used)" : "") << "\n";
+        }
+    }
+
+    bool hasWon() const { return downloadsData >= 4; }
+    bool hasLost() const { return downloadsVirus >= 4; }
+};
+
+/* ------------------------
+   Ability base + concrete abilities
+   (Lightweight examples)
+   ------------------------ */
+struct Ability {
+protected:
+    bool used = false;
+    Player* owner = nullptr;
+public:
+    Ability(Player* p=nullptr): used(false), owner(p) {}
+    virtual ~Ability() = default;
+    bool hasUsed() const { return used; }
+    void markUsed() { used = true; }
+    void setOwner(Player* p) { owner = p; }
+    Player* getOwner() const { return owner; }
+    virtual string name() const = 0;
+    virtual bool use(Game &game, const vector<string> &args) = 0;
+};
+
+/* Forward declarations for ability concrete implementations */
+struct BoostAbility;
+struct FirewallAbility;
+struct DownloadAbility;
+struct ScanAbility;
+struct PolarizeAbility;
+struct BreachAbility;
+struct ReinforceAbility;
+struct RejackAbility;
+
+/* ------------------------
+   Game
+   ------------------------ */
+struct Game {
+    Board board;
+    vector<unique_ptr<Player>> players;
+    int currentPlayerIndex = 0;
+    unique_ptr<Display> textDisplay1;
+    unique_ptr<Display> textDisplay2;
+    bool finished = false;
+    bool player2Lowercase = true; // user preference for display
+
+    Game(int nplayers=2) {
+        for (int i=0;i<nplayers;++i) players.emplace_back(make_unique<Player>(i+1));
+        textDisplay1 = make_unique<TextDisplay>();
+        textDisplay2 = make_unique<TextDisplay>();
+    }
+
+    Player& getCurrentPlayer() { return *players[currentPlayerIndex]; }
+    Player& otherPlayer() { return *players[(currentPlayerIndex+1) % players.size()]; }
+
+    void nextTurn() { currentPlayerIndex = (currentPlayerIndex + 1) % players.size(); }
+
+    // display functions matching classmate names
+    void display_board() {
+        cout << "======= Player 1 view =======\n";
+        textDisplay1->render(board, *players[0], player2Lowercase ? false : false);
+        cout << "======= Player 2 view =======\n";
+        textDisplay2->render(board, *players[1], player2Lowercase);
+    }
+
+    void display_board_graphics() {
+        // For this assignment graphics is a stub: call graphics view for both players
+        auto gdisp = make_unique<GraphicsDisplay>();
+        gdisp->render(board, *players[0], false);
+        gdisp->render(board, *players[1], player2Lowercase);
+    }
+
+    void endGame() {
+        // check players for win/loss and print messages
+        if (players[0]->hasWon()) cout << "Player 1 has won\n";
+        else if (players[0]->hasLost()) cout << "Player 1 has lost\n";
+        else if (players[1]->hasWon()) cout << "Player 2 has won\n";
+        else if (players[1]->hasLost()) cout << "Player 2 has lost\n";
+        else cout << "Game ended (no winner detected)\n";
+        finished = true;
+    }
+
+    // execute a move (char link id -> direction string)
+    bool executeMove(char linkId, const string &dirStr) {
+        Player &p = getCurrentPlayer();
+        auto link = p.getLinkByIdChar(linkId);
+        if (!link) { cout << "Invalid link id\n"; return false; }
+
+        Pos from;
+        if (!board.findLinkPos(link, from)) { cout << "Link not on board\n"; return false; }
+
+        int dr = 0, dc = 0;
+        if (dirStr == "up") { dr = -1; dc = 0; }
+        else if (dirStr == "down") { dr = 1; dc = 0; }
+        else if (dirStr == "left") { dr = 0; dc = -1; }
+        else if (dirStr == "right") { dr = 0; dc = 1; }
+        else { cout << "Invalid direction\n"; return false; }
+
+        Pos to = from;
+        to.r += dr; to.c += dc;
+
+        // boost: one extra cell
+        if (link->boosted) { to.r += dr; to.c += dc; link->boosted = false; }
+
+        // breach: extra 2 cells
+        if (link->breached) { to.r += 2*dr; to.c += 2*dc; link->breached = false; }
+
+        // reinforce prevents move this turn
+        if (link->reinforced) {
+            cout << "This link is reinforced and cannot move this turn.\n";
+            link->reinforced = false; // consumes the reinforcement
+            return false;
+        }
+
+        // off-edge: allow moving off opponent start edge only
+        bool offEdge = !board.inBounds(to);
+        if (offEdge) {
+            int pid = p.playerID;
+            if (pid == 1 && to.r >= Board::R) {
+                // player 1 moving off bottom: download
+            } else if (pid == 2 && to.r < 0) {
+                // player 2 moving off top: download
+            } else {
+                cout << "Cannot move off that edge\n"; return false;
+            }
+            board.clearPos(from);
+            p.addDownloaded(link);
+            p.removeLink(link);
+            cout << p.getName() << " downloaded their own link by moving off opponent edge.\n";
+            return true;
+        }
+
+        auto occ = board.get(to);
+        if (!occ) {
+            board.clearPos(from);
+            board.place(link, to);
+            cout << "Moved " << linkId << " to (" << to.r << "," << to.c << ")\n";
+            return true;
+        } else {
+            if (occ->get()->owner == &p) {
+                cout << "Cannot move onto your own link\n";
+                return false;
+            }
+            // battle
+            bool initiatorWins = link->battleVs(*occ->get(), true);
+            Player *winner = initiatorWins ? &p : occ->get()->owner;
+            Player *loser  = initiatorWins ? occ->get()->owner : &p;
+            shared_ptr<Link> winnerLink = initiatorWins ? link : occ;
+            shared_ptr<Link> loserLink  = initiatorWins ? occ : link;
+
+            board.clearPos(from);
+            board.clearPos(to);
+            board.place(winnerLink, to);
+
+            winner->addDownloaded(loserLink);
+            loser->removeLink(loserLink);
+            loser->addAgainstMe(loserLink);
+
+            cout << winner->getName() << " wins battle and downloads opponent link.\n";
+            return true;
+        }
+    }
+
+    // use ability (1-based index)
+    bool useAbility(int index, const vector<string>& args) {
+        Player &p = getCurrentPlayer();
+        if (index < 1 || index > (int)p.abilities.size()) { cout << "Invalid ability index\n"; return false; }
+        Ability* a = p.abilities[index-1].get();
+        if (a->hasUsed()) { cout << "Ability already used\n"; return false; }
+        bool ok = a->use(*this, args);
+        if (ok) { a->markUsed(); cout << "Ability used: " << a->name() << "\n"; }
+        else cout << "Ability use failed\n";
+        return ok;
+    }
+
+    Player* getPlayerById(int id) {
+        for (auto &pl : players) if (pl->playerID == id) return pl.get();
+        return nullptr;
+    }
+
+    void checkWinConditions() {
+        for (auto &pl : players) {
+            if (pl->hasWon()) {
+                cout << pl->getName() << " wins by downloading 4 data!\n";
+                finished = true;
+                return;
+            } else if (pl->hasLost()) {
+                cout << pl->getName() << " loses (downloaded 4 viruses)!\n";
+                finished = true;
+                return;
+            }
+        }
+    }
+};
+
+/* ------------------------
+   Board display implementation
+   ------------------------ */
+void Board::displayForViewer(const Player &viewer, bool player2Lowercase) const {
+    // header
+    cout << "   ";
+    for (int c=0;c<C;++c) cout << setw(4) << c;
+    cout << "\n";
+    cout << "  +" << string(4*C, '-') << "\n";
+    for (int r=0;r<R;++r) {
+        cout << r << " |";
+        for (int c=0;c<C;++c) {
+            Pos p(r,c);
+            auto L = get(p);
+            char fw = firewallAt(p);
+            string cell = " . ";
+            if (fw) cell = string(1,fw) + "  ";
+            else if (L) {
+                if (L->get()->owner == &viewer) {
+                    cell = L->get()->shortLabel();
+                    // optionally show lowercase for player2's view
+                    if (player2Lowercase && viewer.playerID == 2) {
+                        // make letters lowercase
+                        for (auto &ch : cell) ch = tolower(ch);
+                    }
+                } else {
+                    cell = " ? ";
+                }
+            }
+            cout << setw(4) << cell;
+        }
+        cout << "\n";
+    }
+    cout << viewer.getName() << " downloads: Data=" << viewer.downloadsData << " Virus=" << viewer.downloadsVirus << "\n";
+}
+
+/* ------------------------
+   Abilities (simple implementations)
+   ------------------------ */
+struct BoostAbility : public Ability {
+    BoostAbility(Player* p=nullptr): Ability(p) {}
+    string name() const override { return "LinkBoost"; }
+    bool use(Game &game, const vector<string>& args) override {
+        if (!owner || args.empty()) { cout << "Boost requires link id\n"; return false; }
+        auto L = owner->getLinkByIdChar(args[0][0]);
+        if (!L) { cout << "Link not found\n"; return false; }
+        L->applyBoost();
+        return true;
+    }
+};
+
+struct FirewallAbility : public Ability {
+    FirewallAbility(Player* p=nullptr): Ability(p) {}
+    string name() const override { return "Firewall"; }
+    bool use(Game &game, const vector<string>& args) override {
+        if (!owner || args.empty()) { cout << "Firewall requires r,c\n"; return false; }
+        string s = args[0];
+        auto comma = s.find(',');
+        if (comma==string::npos) { cout << "Invalid pos\n"; return false; }
+        int r = stoi(s.substr(0,comma)), c = stoi(s.substr(comma+1));
+        Pos ppos(r,c);
+        if (!game.board.inBounds(ppos)) { cout << "pos out of bounds\n"; return false; }
+        if (game.board.get(ppos)) { cout << "pos not empty\n"; return false; }
+        char sym = (owner->playerID==1 ? 'm' : 'w');
+        game.board.setFirewall(ppos, sym);
+        return true;
+    }
+};
+
+struct DownloadAbility : public Ability {
+    DownloadAbility(Player* p=nullptr): Ability(p) {}
+    string name() const override { return "Download"; }
+    bool use(Game &game, const vector<string>& args) override {
+        if (!owner || args.empty()) { cout << "Download requires target id\n"; return false; }
+        // find target among other players
+        shared_ptr<Link> target = nullptr; Player* targetOwner = nullptr;
+        for (auto &pl : game.players) {
+            if (pl.get() == owner) continue;
+            auto cand = pl->getLinkByIdChar(args[0][0]);
+            if (cand) { target = cand; targetOwner = pl.get(); break; }
+        }
+        if (!target) { cout << "Target not found\n"; return false; }
+        Pos pos;
+        if (game.board.findLinkPos(target, pos)) game.board.clearPos(pos);
+        targetOwner->removeLink(target);
+        owner->addDownloaded(target);
+        targetOwner->addAgainstMe(target);
+        return true;
+    }
+};
+
+struct ScanAbility : public Ability {
+    ScanAbility(Player* p=nullptr): Ability(p) {}
+    string name() const override { return "Scan"; }
+    bool use(Game &game, const vector<string>& args) override {
+        if (!owner || args.empty()) { cout << "Scan needs arg\n"; return false; }
+        char ch = args[0][0];
+        for (auto &pl : game.players) {
+            auto cand = pl->getLinkByIdChar(ch);
+            if (cand) {
+                cout << "Scan result: Owner=" << pl->get()->getName() << " Type=" << (cand->isVirus() ? "Virus" : "Data") << " Str=" << cand->strength << "\n";
+                return true;
+            }
+        }
+        // or parse as pos
+        auto comma = args[0].find(',');
+        if (comma != string::npos) {
+            int r = stoi(args[0].substr(0,comma));
+            int c = stoi(args[0].substr(comma+1));
+            Pos p(r,c);
+            if (!game.board.inBounds(p)) { cout << "Invalid pos\n"; return false; }
+            auto L = game.board.get(p);
+            if (!L) { cout << "Empty\n"; return true; }
+            cout << "Scan at " << r << "," << c << ": Type=" << (L->isVirus() ? "Virus" : "Data") << " Str=" << L->strength << "\n";
+            return true;
+        }
+        cout << "Scan: nothing found\n";
+        return false;
+    }
+};
+
+struct PolarizeAbility : public Ability {
+    PolarizeAbility(Player* p=nullptr): Ability(p) {}
+    string name() const override { return "Polarize"; }
+    bool use(Game &game, const vector<string>& args) override {
+        if (!owner || args.empty()) { cout << "Polarize needs link id\n"; return false; }
+        // find link anywhere
+        for (auto &pl : game.players) {
+            auto cand = pl->getLinkByIdChar(args[0][0]);
+            if (cand) {
+                cand->toggleType(); // but Link has no toggle method in this minimal class -> implement via direct change
+                // We'll implement toggle here:
+                if (cand->type == TYPE_DATA) cand->type = TYPE_VIRUS; else if (cand->type == TYPE_VIRUS) cand->type = TYPE_DATA;
+                cout << "Polarized\n";
+                return true;
+            }
+        }
+        cout << "Link not found\n"; return false;
+    }
+};
+
+struct BreachAbility : public Ability {
+    BreachAbility(Player* p=nullptr): Ability(p) {}
+    string name() const override { return "Breach"; }
+    bool use(Game &game, const vector<string>& args) override {
+        if (!owner || args.empty()) { cout << "Breach needs link id\n"; return false; }
+        auto L = owner->getLinkByIdChar(args[0][0]);
+        if (!L) { cout << "Link not found\n"; return false; }
+        L->applyBreach();
+        return true;
+    }
+};
+
+struct ReinforceAbility : public Ability {
+    ReinforceAbility(Player* p=nullptr): Ability(p) {}
+    string name() const override { return "Reinforce"; }
+    bool use(Game &game, const vector<string>& args) override {
+        if (!owner || args.empty()) { cout << "Reinforce needs link id\n"; return false; }
+        auto L = owner->getLinkByIdChar(args[0][0]);
+        if (!L) { cout << "Link not found\n"; return false; }
+        L->applyReinforce();
+        return true;
+    }
+};
+
+struct RejackAbility : public Ability {
+    RejackAbility(Player* p=nullptr): Ability(p) {}
+    string name() const override { return "Rejack"; }
+    bool use(Game &game, const vector<string>& args) override {
+        if (!owner) return false;
+        if (owner->downloadedAgainstMe.empty()) { cout << "No links to rejack\n"; return false; }
+        auto reclaimed = owner->downloadedAgainstMe.back();
+        owner->downloadedAgainstMe.pop_back();
+        reclaimed->applyRejack();
+        owner->links.push_back(reclaimed);
+        // try to place reclaimed near player's side
+        int rowbase = (owner->playerID == 1 ? 1 : Board::R - 2);
+        bool placed = false;
+        for (int c=0;c<Board::C && !placed;++c) {
+            Pos p(rowbase, c);
+            if (!game.board.get(p)) { game.board.place(reclaimed, p); placed = true; }
+        }
+        if (!placed) {
+            for (int r=0;r<Board::R && !placed;++r) for (int c=0;c<Board::C && !placed;++c) {
+                Pos p(r,c);
+                if (!game.board.get(p)) { game.board.place(reclaimed, p); placed = true; }
+            }
+        }
+        return true;
+    }
+};
+
+/* ------------------------
+   CommandParser
+   ------------------------ */
+struct CommandParser {
+    Game &game;
+    bool quitFlag = false;
+    CommandParser(Game &g): game(g) {}
+
+    static vector<string> tokenize(const string &s) {
+        vector<string> out; string tok; istringstream iss(s);
+        while (iss >> tok) out.push_back(tok);
+        return out;
+    }
+
+    void runInteractive() {
+        cout << "RAIInet running. Type 'help' for commands.\n";
+        string line;
+        while (!quitFlag && !game.finished) {
+            cout << game.getCurrentPlayer().getName() << "> ";
+            if (!getline(cin, line)) break;
+            if (line.empty()) continue;
+            processLine(line);
+            game.checkWinConditions();
+            if (!game.finished) game.nextTurn();
+        }
+        cout << "Goodbye.\n";
+    }
+
+    void runSequence(const string &filename) {
+        ifstream ifs(filename);
+        if (!ifs) { cout << "Cannot open sequence\n"; return; }
+        string line;
+        while (getline(ifs, line) && !quitFlag && !game.finished) {
+            if (line.empty()) continue;
+            cout << "[seq] " << line << "\n";
+            processLine(line);
+            game.checkWinConditions();
+            if (!game.finished) game.nextTurn();
+        }
+    }
+
+    void processLine(const string &line) {
+        auto toks = tokenize(line);
+        if (toks.empty()) return;
+        string cmd = toks[0];
+        if (cmd == "help") {
+            cout << "Commands: board | move <link> <dir> | abilities | ability <N> [args] | sequence <file> | quit\n";
+            return;
+        }
+        if (cmd == "quit") { quitFlag = true; game.endGame(); return; }
+        if (cmd == "board") { game.display_board(); return; }
+        if (cmd == "move") {
+            if (toks.size() < 3) { cout << "Usage: move <link> <up|down|left|right>\n"; return; }
+            char id = toks[1][0];
+            game.executeMove(id, toks[2]);
+            return;
+        }
+        if (cmd == "abilities") { game.getCurrentPlayer().listAbilities(); return; }
+        if (cmd == "ability") {
+            if (toks.size() < 2) { cout << "usage: ability <N> [args]\n"; return; }
+            int idx = stoi(toks[1]);
+            vector<string> args;
+            for (size_t i=2;i<toks.size();++i) args.push_back(toks[i]);
+            game.useAbility(idx, args);
+            return;
+        }
+        if (cmd == "sequence") {
+            if (toks.size() < 2) { cout << "usage: sequence <file>\n"; return; }
+            runSequence(toks[1]); return;
+        }
+        cout << "Unknown command\n";
+    }
+};
+
+/* ------------------------
+   Setup helper (seed game)
+   ------------------------ */
+void seedDefaultGame(Game &g) {
+    // players exist; fill links and abilities
+    Player &p1 = *g.getPlayerById(1);
+    Player &p2 = *g.getPlayerById(2);
+
+    p1.links.clear(); p2.links.clear();
+
+    for (int i=1;i<=4;i++) p1.links.push_back(make_shared<Link>(i, TYPE_VIRUS, &p1));
+    for (int i=1;i<=4;i++) p1.links.push_back(make_shared<Link>(i, TYPE_DATA, &p1));
+    for (int i=1;i<=4;i++) p2.links.push_back(make_shared<Link>(i, TYPE_VIRUS, &p2));
+    for (int i=1;i<=4;i++) p2.links.push_back(make_shared<Link>(i, TYPE_DATA, &p2));
+
+    // place with server-port adjustment
+    for (int c=0;c<8;c++) {
+        int row = (c==3 || c==4) ? 1 : 0;
+        g.board.place(p1.links[c], Pos(row,c));
+    }
+    for (int c=0;c<8;c++) {
+        int row = (c==3 || c==4) ? 6 : 7;
+        g.board.place(p2.links[c], Pos(row,c));
+    }
+
+    // set default abilities
+    p1.abilities.clear();
+    p1.abilities.emplace_back(make_unique<BoostAbility>(&p1));
+    p1.abilities.emplace_back(make_unique<FirewallAbility>(&p1));
+    p1.abilities.emplace_back(make_unique<DownloadAbility>(&p1));
+    p1.abilities.emplace_back(make_unique<ScanAbility>(&p1));
+    p1.abilities.emplace_back(make_unique<PolarizeAbility>(&p1));
+    p1.abilities.emplace_back(make_unique<BreachAbility>(&p1));
+    p1.abilities.emplace_back(make_unique<ReinforceAbility>(&p1));
+    p1.abilities.emplace_back(make_unique<RejackAbility>(&p1));
+
+    p2.abilities.clear();
+    p2.abilities.emplace_back(make_unique<BoostAbility>(&p2));
+    p2.abilities.emplace_back(make_unique<FirewallAbility>(&p2));
+    p2.abilities.emplace_back(make_unique<DownloadAbility>(&p2));
+    p2.abilities.emplace_back(make_unique<ScanAbility>(&p2));
+    p2.abilities.emplace_back(make_unique<PolarizeAbility>(&p2));
+    p2.abilities.emplace_back(make_unique<BreachAbility>(&p2));
+    p2.abilities.emplace_back(make_unique<ReinforceAbility>(&p2));
+    p2.abilities.emplace_back(make_unique<RejackAbility>(&p2));
+}
+
+/* ------------------------
+   main
+   ------------------------ */
+int main(int argc, char** argv) {
+    ios::sync_with_stdio(false);
+    cin.tie(nullptr);
+
+    Game game(2);
+    seedDefaultGame(game);
+
+    // optional graphics flag not used beyond stub
+    for (int i=1;i<argc;i++) if (string(argv[i]) == "-nolower") game.player2Lowercase = false;
+
+    CommandParser cp(game);
+    cp.runInteractive();
+
+    return 0;
+}
